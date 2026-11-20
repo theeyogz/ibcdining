@@ -570,9 +570,9 @@ class _AdminArtikelPageState extends State<AdminArtikelPage> {
     );
   }
 
-  // ====================================================
+  // ===================================================
   // KONFIRMASI HAPUS
-  // ====================================================
+  // ===================================================
 
   void confirmDelete(ArticleData article) {
     showDialog(
