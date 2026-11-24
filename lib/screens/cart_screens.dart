@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../common.dart';
@@ -343,7 +345,7 @@ class _CheckoutViewState extends State<CheckoutView> {
     }
     final formOk = _formKey.currentState?.validate() ?? false;
     if (cartController.branch == null) {
-      _toast('Pilih cabang pengambilan terlebih dahulu');
+      _toast('Cabang belum dipilih, kembali ke halaman depan untuk memilih');
       return;
     }
     if (_pickupTime == null) {
@@ -357,7 +359,7 @@ class _CheckoutViewState extends State<CheckoutView> {
       return;
     }
 
-    // Simulasi proses pembayaran. Nanti diganti pemanggilan API pembayaran.
+    // Simulasi membuat pesanan. Nanti diganti pemanggilan API pembayaran.
     showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -370,6 +372,8 @@ class _CheckoutViewState extends State<CheckoutView> {
     if (!mounted) return;
     Navigator.of(context).pop(); // tutup dialog loading
 
+    // placeOrder sekarang menghasilkan order berstatus "menunggu pembayaran"
+    // dan otomatis membatalkannya jika lewat batas waktu bayar.
     final order = cartController.placeOrder(
       customerName: _nameController.text.trim().isEmpty
           ? cartController.customerName
@@ -474,12 +478,13 @@ class _CheckoutViewState extends State<CheckoutView> {
                           ),
                           const SizedBox(height: 14),
                           _label('Cabang pengambilan'),
+                          // READ-ONLY: cabang mengikuti pilihan di halaman depan.
                           ListenableBuilder(
                             listenable: cartController,
                             builder: (context, _) {
                               final branch = cartController.branch;
                               return _box(
-                                onTap: () => showBranchPicker(context),
+                                color: const Color(0xFFF1F3F1),
                                 child: Row(
                                   children: [
                                     const Icon(Icons.location_on_outlined,
@@ -487,23 +492,26 @@ class _CheckoutViewState extends State<CheckoutView> {
                                     const SizedBox(width: 8),
                                     Expanded(
                                       child: Text(
-                                        branch ?? 'Pilih cabang',
+                                        branch ?? 'Belum dipilih',
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
+                                        style: const TextStyle(
                                           fontSize: 12,
-                                          color: branch == null
-                                              ? kMuted
-                                              : const Color(0xFF26352C),
+                                          color: Color(0xFF26352C),
                                         ),
                                       ),
                                     ),
-                                    const Icon(Icons.keyboard_arrow_down,
-                                        size: 20, color: kMuted),
+                                    const Icon(Icons.lock_outline,
+                                        size: 16, color: kMuted),
                                   ],
                                 ),
                               );
                             },
+                          ),
+                          const SizedBox(height: 6),
+                          const Text(
+                            'Cabang mengikuti pilihan di halaman depan.',
+                            style: TextStyle(fontSize: 10, color: kMuted),
                           ),
                           const SizedBox(height: 14),
                           _label('Waktu pickup'),
@@ -698,7 +706,7 @@ class OrderStatusView extends StatelessWidget {
     const labels = ['Diproses', 'Siap diambil', 'Selesai'];
     return Row(
       children: List.generate(3, (i) {
-        final done = i <= status.index;
+        final done = i <= status.stepIndex;
         return Expanded(
           child: Padding(
             padding: EdgeInsets.only(right: i < 2 ? 6 : 0),
@@ -717,8 +725,9 @@ class OrderStatusView extends StatelessWidget {
                   labels[i],
                   style: TextStyle(
                     fontSize: 10,
-                    fontWeight:
-                    i == status.index ? FontWeight.w700 : FontWeight.normal,
+                    fontWeight: i == status.stepIndex
+                        ? FontWeight.w700
+                        : FontWeight.normal,
                     color: done ? kGreen : kMuted,
                   ),
                 ),
@@ -800,6 +809,8 @@ class OrderStatusView extends StatelessWidget {
           listenable: cartController,
           builder: (context, _) {
             final status = order.status;
+            final cancelled = status == OrderStatus.dibatalkan;
+            final waiting = status == OrderStatus.menungguPembayaran;
 
             return Column(
               children: [
@@ -814,16 +825,16 @@ class OrderStatusView extends StatelessWidget {
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
                     children: [
-                      _stepper(status),
+                      if (!cancelled) _stepper(status),
                       const SizedBox(height: 24),
                       Center(
                         child: Text(
                           status.label,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 24,
                             fontFamily: 'Times New Roman',
-                            color: kGreen,
+                            color: cancelled ? Colors.red.shade700 : kGreen,
                           ),
                         ),
                       ),
@@ -837,6 +848,10 @@ class OrderStatusView extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 20),
+                      if (waiting) ...[
+                        _PaymentCard(order: order),
+                        const SizedBox(height: 14),
+                      ],
                       SectionCard(
                         title: 'Detail',
                         child: Column(
@@ -861,7 +876,8 @@ class OrderStatusView extends StatelessWidget {
                           ],
                         ),
                       ),
-                      if (status != OrderStatus.diambil)
+                      if (status == OrderStatus.diproses ||
+                          status == OrderStatus.siapDiambil)
                         Padding(
                           padding: const EdgeInsets.only(top: 10),
                           child: TextButton.icon(
@@ -888,7 +904,10 @@ class OrderStatusView extends StatelessWidget {
                         width: double.infinity,
                         height: 48,
                         child: OutlinedButton(
-                          onPressed: () => _showReceipt(context),
+                          // Struk hanya tersedia setelah dibayar.
+                          onPressed: (waiting || cancelled)
+                              ? null
+                              : () => _showReceipt(context),
                           style: OutlinedButton.styleFrom(
                             foregroundColor: kGreen,
                             side: const BorderSide(color: kBorder),
@@ -922,6 +941,137 @@ class OrderStatusView extends StatelessWidget {
             );
           },
         ),
+      ),
+    );
+  }
+}
+
+// ---------- KARTU PEMBAYARAN (QR + HITUNG MUNDUR) ----------
+
+class _PaymentCard extends StatelessWidget {
+  final PickupOrder order;
+
+  const _PaymentCard({required this.order});
+
+  @override
+  Widget build(BuildContext context) {
+    final isQris = order.paymentMethod == 'QRIS';
+
+    return SectionCard(
+      title: 'Pembayaran ${order.paymentMethod}',
+      child: Center(
+        child: Column(
+          children: [
+            if (isQris) ...[
+              // QR statis. DEMO: ketuk QR = dianggap sudah bayar.
+              // Pada sistem asli, status berubah dari callback payment gateway.
+              GestureDetector(
+                onTap: () => cartController.confirmPayment(order),
+                child: Container(
+                  width: 200,
+                  height: 200,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: kBorder),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  // TODO: ganti dengan qr_flutter: QrImageView(data: order.reference)
+                  child: const Icon(Icons.qr_code_2, size: 160, color: kGreen),
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Ketuk kode QR untuk menyelesaikan pembayaran (simulasi)',
+                style: TextStyle(fontSize: 10, color: kMuted),
+                textAlign: TextAlign.center,
+              ),
+            ]
+            else
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  'Instruksi pembayaran akan dikirim dari penyedia pembayaran.',
+                  style: TextStyle(fontSize: 12, color: kMuted),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            const SizedBox(height: 12),
+            Text(
+              rupiah(order.total),
+              style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: kGreen,
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Bayar dalam',
+              style: TextStyle(fontSize: 11, color: kMuted),
+            ),
+            _Countdown(deadline: order.payDeadline),
+            if (!isQris) ...[
+              const SizedBox(height: 8),
+              TextButton.icon(
+                // DEMO: pada sistem asli ini dari callback payment gateway.
+                onPressed: () => cartController.confirmPayment(order),
+                icon: const Icon(Icons.science_outlined, size: 16),
+                label: const Text(
+                  'Simulasi: pembayaran berhasil',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Countdown extends StatefulWidget {
+  final DateTime deadline;
+
+  const _Countdown({required this.deadline});
+
+  @override
+  State<_Countdown> createState() => _CountdownState();
+}
+
+class _CountdownState extends State<_Countdown> {
+  Timer? _timer;
+  late Duration _left;
+
+  void _tick() {
+    _left = widget.deadline.difference(DateTime.now());
+    if (_left.isNegative) _left = Duration.zero;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _tick();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(_tick);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = _left.inMinutes.toString().padLeft(2, '0');
+    final s = (_left.inSeconds % 60).toString().padLeft(2, '0');
+    return Text(
+      '$m:$s',
+      style: const TextStyle(
+        fontSize: 22,
+        fontWeight: FontWeight.w700,
+        color: kGreen,
       ),
     );
   }
