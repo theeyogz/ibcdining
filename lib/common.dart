@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 // ==========================================
@@ -181,20 +183,43 @@ class CartItem {
   int get subtotal => menu.rawPrice * quantity;
 }
 
-enum OrderStatus { diproses, siapDiambil, diambil }
+/// Alur: menungguPembayaran -> diproses -> siapDiambil -> diambil
+/// Cabang: menungguPembayaran -> dibatalkan (otomatis jika lewat batas waktu bayar)
+enum OrderStatus {
+  menungguPembayaran,
+  diproses,
+  siapDiambil,
+  diambil,
+  dibatalkan,
+}
 
 extension OrderStatusX on OrderStatus {
   String get label => switch (this) {
+    OrderStatus.menungguPembayaran => 'Menunggu pembayaran',
     OrderStatus.diproses => 'Pesanan disiapkan',
     OrderStatus.siapDiambil => 'Pesanan siap diambil',
     OrderStatus.diambil => 'Pesanan diambil',
+    OrderStatus.dibatalkan => 'Pesanan dibatalkan',
   };
 
   String get hint => switch (this) {
+    OrderStatus.menungguPembayaran =>
+    'Scan atau ketuk kode QR sebelum waktu pembayaran habis.',
     OrderStatus.diproses => 'Dapur sedang menyiapkan pesanan Anda.',
     OrderStatus.siapDiambil =>
     'Datang ke restoran dan tunjukkan nomor referensi ke kasir.',
     OrderStatus.diambil => 'Terima kasih sudah memesan di IBC Dining.',
+    OrderStatus.dibatalkan =>
+    'Pesanan dibatalkan karena pembayaran tidak diselesaikan tepat waktu.',
+  };
+
+  /// Posisi pada stepper 3 langkah (Diproses, Siap diambil, Selesai).
+  /// -1 = belum ada langkah yang selesai (menunggu bayar / batal).
+  int get stepIndex => switch (this) {
+    OrderStatus.diproses => 0,
+    OrderStatus.siapDiambil => 1,
+    OrderStatus.diambil => 2,
+    _ => -1,
   };
 }
 
@@ -207,6 +232,9 @@ class PickupOrder {
   final List<CartItem> items;
   final int total;
   final DateTime createdAt;
+
+  /// Batas akhir pembayaran. Lewat dari ini, pesanan otomatis dibatalkan.
+  final DateTime payDeadline;
   OrderStatus status;
 
   PickupOrder({
@@ -218,13 +246,17 @@ class PickupOrder {
     required this.items,
     required this.total,
     required this.createdAt,
-    this.status = OrderStatus.diproses,
+    required this.payDeadline,
+    this.status = OrderStatus.menungguPembayaran,
   });
 
   int get totalItems => items.fold(0, (s, i) => s + i.quantity);
 }
 
 class CartController extends ChangeNotifier {
+  /// ASUMSI: batas waktu pembayaran 15 menit. Ubah sesuai kebijakan IBC.
+  static const Duration paymentTimeout = Duration(minutes: 15);
+
   final List<CartItem> _items = [];
   final List<PickupOrder> _orders = [];
   String? _branch;
@@ -263,14 +295,17 @@ class CartController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Membuat pesanan berstatus "menunggu pembayaran" dan memasang timer
+  /// auto-batal. Timer ada di controller, jadi tetap jalan walau user sudah
+  /// keluar dari halaman status.
   PickupOrder placeOrder({
     required String customerName,
     required TimeOfDay pickupTime,
     required String paymentMethod,
   }) {
+    final now = DateTime.now();
     final order = PickupOrder(
-      reference:
-      'PU-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}',
+      reference: 'PU-${now.millisecondsSinceEpoch.toString().substring(7)}',
       customerName: customerName,
       branch: _branch ?? '-',
       pickupTime: pickupTime,
@@ -280,19 +315,46 @@ class CartController extends ChangeNotifier {
           CartItem(menu: i.menu, quantity: i.quantity, note: i.note))
           .toList(),
       total: totalPrice,
-      createdAt: DateTime.now(),
+      createdAt: now,
+      payDeadline: now.add(paymentTimeout),
     );
     _orders.insert(0, order);
     _items.clear();
     notifyListeners();
+
+    // Auto-batal jika sampai batas waktu belum dibayar.
+    Timer(paymentTimeout, () => cancelIfUnpaid(order));
     return order;
   }
 
+  /// Dipanggil saat pembayaran terkonfirmasi.
+  /// DEMO: dipicu ketuk QR. Pada sistem asli, dari callback payment gateway.
+  void confirmPayment(PickupOrder order) {
+    if (order.status != OrderStatus.menungguPembayaran) return;
+    // Cegah bayar setelah lewat batas waktu (timer bisa telat sedikit).
+    if (DateTime.now().isAfter(order.payDeadline)) {
+      cancelIfUnpaid(order);
+      return;
+    }
+    order.status = OrderStatus.diproses;
+    notifyListeners();
+  }
+
+  /// Membatalkan pesanan yang belum dibayar. Aman dipanggil berulang.
+  void cancelIfUnpaid(PickupOrder order) {
+    if (order.status != OrderStatus.menungguPembayaran) return;
+    order.status = OrderStatus.dibatalkan;
+    notifyListeners();
+  }
+
+  /// DEMO: pada sistem asli status diubah staf/admin.
   void advanceStatus(PickupOrder order) {
     if (order.status == OrderStatus.diproses) {
       order.status = OrderStatus.siapDiambil;
     } else if (order.status == OrderStatus.siapDiambil) {
       order.status = OrderStatus.diambil;
+    } else {
+      return; // menunggu bayar / selesai / batal: tidak bisa dimajukan
     }
     notifyListeners();
   }

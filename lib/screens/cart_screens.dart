@@ -384,7 +384,7 @@ class _CheckoutViewState extends State<CheckoutView> {
     );
   }
 
-  Widget _box({required Widget child, VoidCallback? onTap}) {
+  Widget _box({required Widget child, VoidCallback? onTap, Color? color}) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
@@ -394,7 +394,7 @@ class _CheckoutViewState extends State<CheckoutView> {
         padding: const EdgeInsets.symmetric(horizontal: 12),
         alignment: Alignment.centerLeft,
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: color ?? Colors.white,
           border: Border.all(color: kBorder),
           borderRadius: BorderRadius.circular(10),
         ),
