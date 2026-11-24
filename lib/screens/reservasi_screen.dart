@@ -25,6 +25,58 @@ class EventPackage {
   String get label => '$name · ${rupiah(pricePerPax)}/pax';
 }
 
+// ==========================================
+// SLOT KAPASITAS RESERVASI REGULAR (SEMENTARA, DI MEMORI)
+// Kapasitas dihitung dalam jumlah orang, per cabang + tanggal + jam + area.
+// Setiap reservasi mengurangi sisa kapasitas sebesar jumlah tamunya.
+// Nanti ganti dengan data dari database (tabel reservasi).
+// ==========================================
+
+class RegularSlotStore {
+  // TODO: placeholder, ganti dengan kapasitas asli tiap area.
+  static const Map<String, int> areaCapacity = {
+    'Indoor (Non-Smoking)': 40,
+    'Indoor (Smoking)': 20,
+    'Outdoor': 30,
+  };
+
+  final Map<String, int> _booked = {};
+
+  static const int closeHour = 22; // restoran tutup jam 22.00
+  static const int holdHours = 2; // kursi ditahan 2 jam
+
+  // Slot dihitung per jam. Reservasi jam 21.xx menahan kursi di jam 21 dan 22
+  // (jam yang sudah lewat jam tutup tidak dihitung).
+  Iterable<String> _heldKeys(
+      String branch, DateTime date, TimeOfDay time, String area) sync* {
+    for (int h = time.hour; h < time.hour + holdHours && h < closeHour; h++) {
+      yield '$branch|${date.year}-${date.month}-${date.day}|$h|$area';
+    }
+  }
+
+  int capacityOf(String area) => areaCapacity[area] ?? 0;
+
+  // Sisa kapasitas = kapasitas dikurangi jam terpadat di antara jam yang ditahan.
+  int remaining(String branch, DateTime date, TimeOfDay time, String area) {
+    int busiest = 0;
+    for (final k in _heldKeys(branch, date, time, area)) {
+      final used = _booked[k] ?? 0;
+      if (used > busiest) busiest = used;
+    }
+    final left = capacityOf(area) - busiest;
+    return left < 0 ? 0 : left;
+  }
+
+  void book(String branch, DateTime date, TimeOfDay time, String area,
+      int guests) {
+    for (final k in _heldKeys(branch, date, time, area)) {
+      _booked[k] = (_booked[k] ?? 0) + guests;
+    }
+  }
+}
+
+final RegularSlotStore regularSlotStore = RegularSlotStore();
+
 class ReservasiView extends StatefulWidget {
   const ReservasiView({super.key});
 
@@ -42,6 +94,7 @@ class _ReservasiViewState extends State<ReservasiView> {
 
   static const int _minGuests = 2;
   static const int _maxGuests = 10;
+  static const int _guestStep = 2; // jumlah tamu regular harus genap
 
   // Daftar cabang diambil dari common.dart (ibcBranches)
   final List<String> _locations = ibcBranches;
@@ -57,6 +110,26 @@ class _ReservasiViewState extends State<ReservasiView> {
   TimeOfDay? _selectedTime;
   int _guestCount = _minGuests;
   String? _selectedArea;
+
+  // Sisa kapasitas slot regular. Null jika lokasi/tanggal/waktu/area belum lengkap.
+  int? get _slotRemaining {
+    final loc = _selectedLocation;
+    final date = _selectedDate;
+    final time = _selectedTime;
+    final area = _selectedArea;
+    if (loc == null || date == null || time == null || area == null) {
+      return null;
+    }
+    return regularSlotStore.remaining(loc, date, time, area);
+  }
+
+  // Batas atas jumlah tamu: maksimal per reservasi atau sisa slot (yang lebih kecil).
+  int get _guestLimit {
+    final left = _slotRemaining;
+    if (left == null) return _maxGuests;
+    final evenLeft = left - (left % _guestStep); // bulatkan turun ke genap
+    return evenLeft < _maxGuests ? evenLeft : _maxGuests;
+  }
 
   // ---------- Booking Event (Private) ----------
   static const int _eventMinGuests = 30;
@@ -308,9 +381,22 @@ class _ReservasiViewState extends State<ReservasiView> {
       context: context,
       initialTime: _selectedTime ?? const TimeOfDay(hour: 19, minute: 0),
     );
-    if (picked != null) {
-      setState(() => _selectedTime = picked);
+    if (picked == null) return;
+
+    // Restoran tutup jam 22.00, jadi jam itu ke atas tidak bisa dipesan.
+    if (picked.hour >= RegularSlotStore.closeHour) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Restoran tutup pukul 22.00. Pilih waktu sebelum jam tersebut.'),
+          ),
+        );
+      return;
     }
+    setState(() => _selectedTime = picked);
   }
 
   void _confirmRegular() {
@@ -328,6 +414,26 @@ class _ReservasiViewState extends State<ReservasiView> {
         );
       return;
     }
+
+    // Cek sisa kapasitas slot, lalu kurangi sesuai jumlah tamu.
+    final left = _slotRemaining ?? 0;
+    if (_guestCount > left) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(left == 0
+                ? 'Slot ini sudah penuh. Pilih jam, tanggal, atau area lain.'
+                : 'Sisa kapasitas slot ini hanya $left orang.'),
+          ),
+        );
+      return;
+    }
+    regularSlotStore.book(_selectedLocation!, _selectedDate!, _selectedTime!,
+        _selectedArea!, _guestCount);
+    final leftAfter = regularSlotStore.remaining(
+        _selectedLocation!, _selectedDate!, _selectedTime!, _selectedArea!);
+    setState(() {});
 
     final code =
         'IBC-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
@@ -374,6 +480,7 @@ class _ReservasiViewState extends State<ReservasiView> {
               _ticketRow('Waktu', _formatTime(_selectedTime!)),
               _ticketRow('Jumlah tamu', '$_guestCount Orang'),
               _ticketRow('Area meja', _selectedArea!),
+              _ticketRow('Sisa slot area ini', '$leftAfter orang'),
               const Divider(color: borderColor),
               const SizedBox(height: 14),
               SizedBox(
@@ -725,8 +832,8 @@ class _ReservasiViewState extends State<ReservasiView> {
           children: [
             _counterButton(
               Icons.remove,
-              _guestCount > _minGuests
-                  ? () => setState(() => _guestCount--)
+              _guestCount - _guestStep >= _minGuests
+                  ? () => setState(() => _guestCount -= _guestStep)
                   : null,
             ),
             Text(
@@ -739,13 +846,15 @@ class _ReservasiViewState extends State<ReservasiView> {
             ),
             _counterButton(
               Icons.add,
-              _guestCount < _maxGuests
-                  ? () => setState(() => _guestCount++)
+              _guestCount + _guestStep <= _guestLimit
+                  ? () => setState(() => _guestCount += _guestStep)
                   : null,
             ),
           ],
         ),
-        const SizedBox(height: 27),
+        const SizedBox(height: 10),
+        _buildSlotInfo(),
+        const SizedBox(height: 17),
         const Text(
           'Pilih Area Meja',
           style: TextStyle(
@@ -984,6 +1093,55 @@ class _ReservasiViewState extends State<ReservasiView> {
           style: TextStyle(fontSize: 9, height: 1.45, color: mutedColor),
         ),
       ],
+    );
+  }
+
+  // Info sisa slot di bawah counter jumlah tamu (Regular).
+  Widget _buildSlotInfo() {
+    final left = _slotRemaining;
+    final area = _selectedArea;
+
+    if (left == null || area == null) {
+      return const Text(
+        'Pilih lokasi, tanggal, waktu, dan area meja untuk melihat sisa slot.',
+        style: TextStyle(fontSize: 9, height: 1.45, color: mutedColor),
+      );
+    }
+
+    final total = regularSlotStore.capacityOf(area);
+    final tooMany = _guestCount > left;
+    final full = left == 0;
+    final color = (full || tooMany) ? Colors.red.shade700 : primaryColor;
+
+    final text = full
+        ? 'Slot penuh untuk area ini. Pilih jam, tanggal, atau area lain.'
+        : tooMany
+        ? 'Sisa slot hanya $left orang. Kurangi jumlah tamu atau pilih slot lain.'
+        : 'Sisa slot: $left dari $total orang (jam ${_selectedTime!.hour.toString().padLeft(2, '0')}.00).';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE7ECE8),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.event_seat_outlined, size: 16, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color: color,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
